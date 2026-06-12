@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -641,7 +643,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	}
 
 	// Download the media using whatsmeow client
-	mediaData, err := client.Download(downloader)
+	mediaData, err := client.Download(context.Background(), downloader)
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
 	}
@@ -800,14 +802,14 @@ func main() {
 		return
 	}
 
-	container, err := sqlstore.New("sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
+	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
 		return
 	}
 
 	// Get device store - This contains session information
-	deviceStore, err := container.GetFirstDevice()
+	deviceStore, err := container.GetFirstDevice(context.Background())
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// No device exists, create one
@@ -825,6 +827,61 @@ func main() {
 		logger.Errorf("Failed to create WhatsApp client")
 		return
 	}
+
+	// Network workaround for hosts (e.g. some VMs) where the first TLS handshake
+	// to a new destination is silently dropped — likely stateful firewall /
+	// connection-tracking warmup — so it hangs ~15s and times out, while an
+	// immediate retry to the same IP succeeds in <100ms. whatsmeow does a single
+	// Connect() with no retry, so it always died on that first attempt. We give
+	// it an HTTP client whose TLS dialer retries the handshake with a short
+	// per-attempt timeout. We also pin to IPv4 (the IPv6 path on these hosts
+	// accepts the TCP connection but drops data) and force HTTP/1.1 (HTTP/2's
+	// larger handshake hangs here, and WebSockets need HTTP/1.1 regardless).
+	ipv4Dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
+	dialTLS := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		switch network {
+		case "tcp", "tcp6":
+			network = "tcp4"
+		}
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			host = addr
+		}
+		var lastErr error
+		for attempt := 0; attempt < 6; attempt++ {
+			rawConn, derr := ipv4Dialer.DialContext(ctx, network, addr)
+			if derr != nil {
+				lastErr = derr
+				continue
+			}
+			tlsConn := tls.Client(rawConn, &tls.Config{
+				ServerName: host,
+				NextProtos: []string{"http/1.1"},
+			})
+			hsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			herr := tlsConn.HandshakeContext(hsCtx)
+			cancel()
+			if herr == nil {
+				return tlsConn, nil
+			}
+			_ = rawConn.Close()
+			lastErr = herr
+			logger.Warnf("TLS handshake to %s failed (attempt %d), retrying: %v", addr, attempt+1, herr)
+		}
+		return nil, lastErr
+	}
+	httpClient := &http.Client{Transport: &http.Transport{
+		DialContext:    ipv4Dialer.DialContext,
+		DialTLSContext: dialTLS,
+		// Non-nil empty map disables HTTP/2 (forces HTTP/1.1).
+		TLSNextProto:          make(map[string]func(string, *tls.Conn) http.RoundTripper),
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}}
+	client.SetPreLoginHTTPClient(httpClient)
+	client.SetWebsocketHTTPClient(httpClient)
+	client.SetMediaHTTPClient(httpClient)
 
 	// Initialize message store
 	messageStore, err := NewMessageStore()
@@ -973,7 +1030,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 
 		// If we didn't get a name, try group info
 		if name == "" {
-			groupInfo, err := client.GetGroupInfo(jid)
+			groupInfo, err := client.GetGroupInfo(context.Background(), jid)
 			if err == nil && groupInfo.Name != "" {
 				name = groupInfo.Name
 			} else {
@@ -988,7 +1045,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 		logger.Infof("Getting name for contact: %s", chatJID)
 
 		// Just use contact info (full name)
-		contact, err := client.Store.Contacts.GetContact(jid)
+		contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
 		if err == nil && contact.FullName != "" {
 			name = contact.FullName
 		} else if sender != "" {

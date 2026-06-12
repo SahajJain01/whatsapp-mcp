@@ -14,6 +14,45 @@ Here's an example of what you can do when it's connected to Claude.
 
 > *Caution:* as with many MCP servers, the WhatsApp MCP is subject to [the lethal trifecta](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/). This means that project injection could lead to private data exfiltration.
 
+## Quick setup on Windows (automated)
+
+If you're on Windows (including a KVM/QEMU VM like this fork was set up on), you can skip the manual steps below and run the bundled script:
+
+```powershell
+git clone https://github.com/<your-account>/whatsapp-mcp.git
+cd whatsapp-mcp
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
+```
+
+`setup.ps1` is idempotent and does everything:
+
+- Installs **Go**, **MSYS2 + GCC** (for CGO/go-sqlite3), and **uv** via `winget` (skips any already present)
+- Enables CGO and **builds** `whatsapp-bridge.exe`
+- Runs `uv sync` to prepare the Python MCP server
+- Registers a **hidden auto-start scheduled task** (`WhatsAppBridge`) so the bridge runs with no window and starts on every login
+- Wires the server into **Claude Desktop**'s `claude_desktop_config.json`
+- Opens a window **once** to scan the WhatsApp QR code (only the first time)
+
+After it finishes, restart Claude Desktop and try *"search my WhatsApp contacts"*.
+
+### Managing the hidden bridge
+
+- **Stop:** `Stop-ScheduledTask -TaskName WhatsAppBridge; Get-Process whatsapp-bridge | Stop-Process`
+- **Disable auto-start:** `Disable-ScheduledTask -TaskName WhatsAppBridge`
+- **Re-authenticate** (WhatsApp expires linked devices ~every 20 days): double-click `whatsapp-bridge\run-bridge.ps1`, scan the QR once, close the window — the hidden task takes over again.
+
+### Network workaround baked into the bridge
+
+This fork's `whatsapp-bridge/main.go` includes a fix for hosts (notably some VMs) where the default WhatsApp connection hangs:
+
+- Forces **IPv4** (the IPv6 path on these hosts accepts the TCP connection but drops data)
+- Forces **HTTP/1.1** (HTTP/2's larger TLS handshake gets black-holed)
+- **Retries the TLS handshake** (the first handshake to a new host is silently dropped and times out at ~15s; a retry succeeds in <100ms)
+
+You'll see one `TLS handshake failed (attempt 1), retrying` warning on startup — that's expected and harmless. On a normal network these workarounds are no-ops.
+
+It also upgrades `whatsmeow` to a current version (the original pin was rejected by WhatsApp with a `405 Client outdated` error).
+
 ## Installation
 
 ### Prerequisites

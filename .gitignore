@@ -1,3 +1,15 @@
+# Databases (local message store)
 *.db
+
+# Local Claude Desktop config (machine-specific)
 claude_desktop_config.json
-whatsapp.log
+
+# Logs
+*.log
+
+# Compiled bridge binary (built by setup.ps1 / go build)
+whatsapp-bridge/whatsapp-bridge.exe
+*.exe
+
+# Diagnostic scratch
+tlstest/
