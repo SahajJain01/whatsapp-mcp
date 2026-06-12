@@ -5,12 +5,15 @@
 .DESCRIPTION
   On some VirtIO-backed VMs the host mishandles TCP segmentation offload, so
   the first/large TLS handshakes are silently dropped: HTTPS hangs ~15s,
-  HTTP/2 black-holes, the Microsoft Store gets stuck on "checking
-  dependencies", `gh`/Go apps time out -- while ping and small requests work.
+  HTTP/2 black-holes, `gh`/Go apps time out -- while ping/small requests work.
+  Separately, some providers' DNS servers hijack Microsoft's download CDNs
+  (returning private 10.x IPs), so the Microsoft Store hangs on "checking
+  dependencies" and Windows Update breaks.
 
-  This disables NIC hardware offloads and a few TCP features that trigger the
-  bug. It is system-wide (fixes ALL apps), persistent across reboots, and
-  reversible (see the bottom of this file). Must be run as Administrator.
+  This switches to public DNS, disables NIC hardware offloads, and turns off a
+  few TCP features that trigger the bug. It is system-wide (fixes ALL apps),
+  persistent across reboots, and reversible (see the bottom of this file).
+  Must be run as Administrator.
 
   After running, the per-app workaround in whatsapp-bridge/main.go becomes a
   no-op -- but it's harmless to keep for portability to un-fixed machines.
@@ -26,6 +29,19 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 }
 
 $adapters = Get-NetAdapter | Where-Object Status -eq 'Up'
+
+# --- DNS ----------------------------------------------------------------
+# Some VM providers' DNS servers hijack Microsoft's download/Update CDNs,
+# returning private 10.x addresses so the Microsoft Store hangs on
+# "checking dependencies" and Windows Update fails. Switch to public DNS.
+foreach ($a in $adapters) {
+    Write-Host "Setting public DNS on '$($a.Name)' (1.1.1.1, 8.8.8.8)..." -ForegroundColor Cyan
+    Set-DnsClientServerAddress -InterfaceAlias $a.Name -ServerAddresses ("1.1.1.1","8.8.8.8") -ErrorAction SilentlyContinue
+}
+Clear-DnsClientCache
+ipconfig /flushdns | Out-Null
+
+# --- NIC offloads -------------------------------------------------------
 foreach ($a in $adapters) {
     $n = $a.Name
     Write-Host "Disabling hardware offloads on '$n'..." -ForegroundColor Cyan
@@ -56,6 +72,11 @@ Write-Host "Test with:  (Invoke-WebRequest https://github.com -UseBasicParsing).
 
 <#
 TO REVERT (run as Administrator):
+
+  # Restore DHCP-provided DNS:
+  foreach ($n in (Get-NetAdapter | Where-Object Status -eq 'Up').Name) {
+      Set-DnsClientServerAddress -InterfaceAlias $n -ResetServerAddresses
+  }
 
   foreach ($n in (Get-NetAdapter | Where-Object Status -eq 'Up').Name) {
       Enable-NetAdapterLso            -Name $n
