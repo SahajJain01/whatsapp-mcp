@@ -53,6 +53,16 @@ You'll see one `TLS handshake failed (attempt 1), retrying` warning on startup â
 
 It also upgrades `whatsmeow` to a current version (the original pin was rejected by WhatsApp with a `405 Client outdated` error).
 
+### Optional: fix the networking for *all* apps (VirtIO VMs)
+
+The bridge workaround above only fixes the bridge. If the **whole VM** has flaky TLS (Microsoft Store stuck on "checking dependencies", HTTP/2 hanging, `gh`/Go tools timing out), the cause is usually a VirtIO NIC hardware-offload bug on the host. Fix it system-wide with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\fix-vm-networking.ps1
+```
+
+This disables NIC offloads (LSO/RSC/checksum), lowers the MTU, and turns off a few TCP features that trigger the bug. It's persistent across reboots and reversible (revert block is at the bottom of the script). Run it elevated.
+
 ## Installation
 
 ### Prerequisites
