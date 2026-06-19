@@ -1,5 +1,12 @@
+import base64
+import json
+import mimetypes
+from pathlib import Path
 from typing import List, Dict, Any, Optional
+from urllib.parse import quote, unquote
+
 from mcp.server.fastmcp import FastMCP
+from mcp.types import BlobResourceContents, EmbeddedResource, ImageContent, TextContent
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
@@ -17,6 +24,51 @@ from whatsapp import (
 
 # Initialize FastMCP server
 mcp = FastMCP("whatsapp")
+
+DEFAULT_MAX_INLINE_MEDIA_BYTES = 8 * 1024 * 1024
+
+
+def _media_resource_uri(message_id: str, chat_jid: str) -> str:
+    return f"whatsapp-media://{quote(chat_jid, safe='')}/{quote(message_id, safe='')}"
+
+
+def _guess_media_mime_type(file_path: str) -> str:
+    mime_type, _ = mimetypes.guess_type(file_path)
+    return mime_type or "application/octet-stream"
+
+
+def _build_media_metadata(message_id: str, chat_jid: str, file_path: str) -> Dict[str, Any]:
+    path = Path(file_path)
+    return {
+        "success": True,
+        "message": "Media downloaded successfully",
+        "message_id": message_id,
+        "chat_jid": chat_jid,
+        "file_path": str(path),
+        "filename": path.name,
+        "mime_type": _guess_media_mime_type(str(path)),
+        "size_bytes": path.stat().st_size,
+        "resource_uri": _media_resource_uri(message_id, chat_jid),
+    }
+
+
+@mcp.resource(
+    "whatsapp-media://{chat_jid}/{message_id}",
+    name="WhatsApp media",
+    description="Downloaded WhatsApp media content for a message",
+    mime_type="application/octet-stream",
+)
+def get_media_resource(chat_jid: str, message_id: str) -> bytes:
+    """Read downloaded WhatsApp media bytes for clients that support MCP resources."""
+    decoded_chat_jid = unquote(chat_jid)
+    decoded_message_id = unquote(message_id)
+    file_path = whatsapp_download_media(decoded_message_id, decoded_chat_jid)
+
+    if not file_path:
+        raise FileNotFoundError("Media could not be downloaded")
+
+    return Path(file_path).read_bytes()
+
 
 @mcp.tool()
 def search_contacts(query: str) -> List[Dict[str, Any]]:
@@ -222,29 +274,108 @@ def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:
     }
 
 @mcp.tool()
-def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
-    """Download media from a WhatsApp message and get the local file path.
+def download_media(
+    message_id: str,
+    chat_jid: str,
+    include_data: bool = True,
+    max_inline_bytes: int = DEFAULT_MAX_INLINE_MEDIA_BYTES
+) -> List[Any]:
+    """Download media from a WhatsApp message and return content clients can read.
     
     Args:
         message_id: The ID of the message containing the media
         chat_jid: The JID of the chat containing the message
+        include_data: Whether to include the media bytes in the tool response when possible
+        max_inline_bytes: Maximum file size to include inline in the tool response
     
     Returns:
-        A dictionary containing success status, a status message, and the file path if successful
+        Metadata plus inline image/resource content when the downloaded file is small enough
     """
     file_path = whatsapp_download_media(message_id, chat_jid)
     
-    if file_path:
-        return {
-            "success": True,
-            "message": "Media downloaded successfully",
-            "file_path": file_path
-        }
+    if not file_path:
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "message": "Failed to download media"
+                })
+            )
+        ]
+
+    try:
+        metadata = _build_media_metadata(message_id, chat_jid, file_path)
+    except OSError as exc:
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "message": f"Media downloaded but could not be read: {exc}",
+                    "file_path": file_path,
+                })
+            )
+        ]
+
+    content: List[Any] = [
+        TextContent(type="text", text=json.dumps(metadata))
+    ]
+
+    if not include_data:
+        return content
+
+    if max_inline_bytes < 0:
+        max_inline_bytes = 0
+
+    if metadata["size_bytes"] > max_inline_bytes:
+        content[0] = TextContent(
+            type="text",
+            text=json.dumps({
+                **metadata,
+                "inline_data_included": False,
+                "inline_data_reason": (
+                    f"File is {metadata['size_bytes']} bytes, above max_inline_bytes={max_inline_bytes}. "
+                    "Read resource_uri to retrieve the bytes."
+                )
+            })
+        )
+        return content
+
+    with open(file_path, "rb") as media_file:
+        encoded_data = base64.b64encode(media_file.read()).decode("ascii")
+
+    mime_type = metadata["mime_type"]
+    content[0] = TextContent(
+        type="text",
+        text=json.dumps({
+            **metadata,
+            "inline_data_included": True,
+            "data_base64": encoded_data,
+        })
+    )
+
+    if mime_type.startswith("image/"):
+        content.append(
+            ImageContent(
+                type="image",
+                data=encoded_data,
+                mimeType=mime_type,
+            )
+        )
     else:
-        return {
-            "success": False,
-            "message": "Failed to download media"
-        }
+        content.append(
+            EmbeddedResource(
+                type="resource",
+                resource=BlobResourceContents(
+                    uri=metadata["resource_uri"],
+                    mimeType=mime_type,
+                    blob=encoded_data,
+                ),
+            )
+        )
+
+    return content
 
 if __name__ == "__main__":
     # Initialize and run the server

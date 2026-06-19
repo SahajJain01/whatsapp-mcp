@@ -79,6 +79,7 @@ func NewMessageStore() (*MessageStore, error) {
 			media_type TEXT,
 			filename TEXT,
 			url TEXT,
+			direct_path TEXT,
 			media_key BLOB,
 			file_sha256 BLOB,
 			file_enc_sha256 BLOB,
@@ -90,6 +91,12 @@ func NewMessageStore() (*MessageStore, error) {
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to create tables: %v", err)
+	}
+
+	_, err = db.Exec("ALTER TABLE messages ADD COLUMN direct_path TEXT")
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate messages table: %v", err)
 	}
 
 	return &MessageStore{db: db}, nil
@@ -111,7 +118,7 @@ func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time
 
 // Store a message in the database
 func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
-	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
+	mediaType, filename, url, directPath string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
 	// Only store if there's actual content or media
 	if content == "" && mediaType == "" {
 		return nil
@@ -119,9 +126,9 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 
 	_, err := store.db.Exec(
 		`INSERT OR REPLACE INTO messages 
-		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length) 
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
+		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, direct_path, media_key, file_sha256, file_enc_sha256, file_length) 
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, directPath, mediaKey, fileSHA256, fileEncSHA256, fileLength,
 	)
 	return err
 }
@@ -348,7 +355,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 			}
 		case whatsmeow.MediaDocument:
 			msg.DocumentMessage = &waProto.DocumentMessage{
-				Title:         proto.String(mediaPath[strings.LastIndex(mediaPath, "/")+1:]),
+				Title:         proto.String(filepath.Base(mediaPath)),
 				Caption:       proto.String(message),
 				Mimetype:      proto.String(mimeType),
 				URL:           &resp.URL,
@@ -374,27 +381,27 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 }
 
 // Extract media info from a message
-func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
+func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, url string, directPath string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
 	if msg == nil {
-		return "", "", "", nil, nil, nil, 0
+		return "", "", "", "", nil, nil, nil, 0
 	}
 
 	// Check for image message
 	if img := msg.GetImageMessage(); img != nil {
 		return "image", "image_" + time.Now().Format("20060102_150405") + ".jpg",
-			img.GetURL(), img.GetMediaKey(), img.GetFileSHA256(), img.GetFileEncSHA256(), img.GetFileLength()
+			img.GetURL(), img.GetDirectPath(), img.GetMediaKey(), img.GetFileSHA256(), img.GetFileEncSHA256(), img.GetFileLength()
 	}
 
 	// Check for video message
 	if vid := msg.GetVideoMessage(); vid != nil {
 		return "video", "video_" + time.Now().Format("20060102_150405") + ".mp4",
-			vid.GetURL(), vid.GetMediaKey(), vid.GetFileSHA256(), vid.GetFileEncSHA256(), vid.GetFileLength()
+			vid.GetURL(), vid.GetDirectPath(), vid.GetMediaKey(), vid.GetFileSHA256(), vid.GetFileEncSHA256(), vid.GetFileLength()
 	}
 
 	// Check for audio message
 	if aud := msg.GetAudioMessage(); aud != nil {
 		return "audio", "audio_" + time.Now().Format("20060102_150405") + ".ogg",
-			aud.GetURL(), aud.GetMediaKey(), aud.GetFileSHA256(), aud.GetFileEncSHA256(), aud.GetFileLength()
+			aud.GetURL(), aud.GetDirectPath(), aud.GetMediaKey(), aud.GetFileSHA256(), aud.GetFileEncSHA256(), aud.GetFileLength()
 	}
 
 	// Check for document message
@@ -404,10 +411,16 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 			filename = "document_" + time.Now().Format("20060102_150405")
 		}
 		return "document", filename,
-			doc.GetURL(), doc.GetMediaKey(), doc.GetFileSHA256(), doc.GetFileEncSHA256(), doc.GetFileLength()
+			doc.GetURL(), doc.GetDirectPath(), doc.GetMediaKey(), doc.GetFileSHA256(), doc.GetFileEncSHA256(), doc.GetFileLength()
 	}
 
-	return "", "", "", nil, nil, nil, 0
+	// Check for sticker message
+	if sticker := msg.GetStickerMessage(); sticker != nil {
+		return "sticker", "sticker_" + time.Now().Format("20060102_150405") + ".webp",
+			sticker.GetURL(), sticker.GetDirectPath(), sticker.GetMediaKey(), sticker.GetFileSHA256(), sticker.GetFileEncSHA256(), 0
+	}
+
+	return "", "", "", "", nil, nil, nil, 0
 }
 
 // Handle regular incoming messages with media support
@@ -429,7 +442,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	content := extractTextContent(msg.Message)
 
 	// Extract media info
-	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message)
+	mediaType, filename, url, directPath, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message)
 
 	// Skip if there's no content and no media
 	if content == "" && mediaType == "" {
@@ -447,6 +460,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		mediaType,
 		filename,
 		url,
+		directPath,
 		mediaKey,
 		fileSHA256,
 		fileEncSHA256,
@@ -487,26 +501,40 @@ type DownloadMediaResponse struct {
 }
 
 // Store additional media info in the database
-func (store *MessageStore) StoreMediaInfo(id, chatJID, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
+func (store *MessageStore) StoreMediaInfo(id, chatJID, url, directPath string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
 	_, err := store.db.Exec(
-		"UPDATE messages SET url = ?, media_key = ?, file_sha256 = ?, file_enc_sha256 = ?, file_length = ? WHERE id = ? AND chat_jid = ?",
-		url, mediaKey, fileSHA256, fileEncSHA256, fileLength, id, chatJID,
+		"UPDATE messages SET url = ?, direct_path = ?, media_key = ?, file_sha256 = ?, file_enc_sha256 = ?, file_length = ? WHERE id = ? AND chat_jid = ?",
+		url, directPath, mediaKey, fileSHA256, fileEncSHA256, fileLength, id, chatJID,
 	)
 	return err
 }
 
 // Get media info from the database
-func (store *MessageStore) GetMediaInfo(id, chatJID string) (string, string, string, []byte, []byte, []byte, uint64, error) {
-	var mediaType, filename, url string
+func (store *MessageStore) GetMediaInfo(id, chatJID string) (string, string, string, string, []byte, []byte, []byte, uint64, error) {
+	var mediaType, filename, url, directPath sql.NullString
 	var mediaKey, fileSHA256, fileEncSHA256 []byte
-	var fileLength uint64
+	var fileLength sql.NullInt64
 
 	err := store.db.QueryRow(
-		"SELECT media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length FROM messages WHERE id = ? AND chat_jid = ?",
+		"SELECT media_type, filename, url, direct_path, media_key, file_sha256, file_enc_sha256, file_length FROM messages WHERE id = ? AND chat_jid = ?",
 		id, chatJID,
-	).Scan(&mediaType, &filename, &url, &mediaKey, &fileSHA256, &fileEncSHA256, &fileLength)
+	).Scan(&mediaType, &filename, &url, &directPath, &mediaKey, &fileSHA256, &fileEncSHA256, &fileLength)
 
-	return mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, err
+	return nullString(mediaType), nullString(filename), nullString(url), nullString(directPath), mediaKey, fileSHA256, fileEncSHA256, nullUint64(fileLength), err
+}
+
+func nullString(value sql.NullString) string {
+	if !value.Valid {
+		return ""
+	}
+	return value.String
+}
+
+func nullUint64(value sql.NullInt64) uint64 {
+	if !value.Valid || value.Int64 < 0 {
+		return 0
+	}
+	return uint64(value.Int64)
 }
 
 // MediaDownloader implements the whatsmeow.DownloadableMessage interface
@@ -558,7 +586,7 @@ func (d *MediaDownloader) GetMediaType() whatsmeow.MediaType {
 // Function to download media from a message
 func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, messageID, chatJID string) (bool, string, string, string, error) {
 	// Query the database for the message
-	var mediaType, filename, url string
+	var mediaType, filename, url, directPath string
 	var mediaKey, fileSHA256, fileEncSHA256 []byte
 	var fileLength uint64
 	var err error
@@ -568,7 +596,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	localPath := ""
 
 	// Get media info from the database
-	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, err = messageStore.GetMediaInfo(messageID, chatJID)
+	mediaType, filename, url, directPath, mediaKey, fileSHA256, fileEncSHA256, fileLength, err = messageStore.GetMediaInfo(messageID, chatJID)
 
 	if err != nil {
 		// Try to get basic info if extended info isn't available
@@ -592,8 +620,8 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 		return false, "", "", "", fmt.Errorf("failed to create chat directory: %v", err)
 	}
 
-	// Generate a local path for the file
-	localPath = fmt.Sprintf("%s/%s", chatDir, filename)
+	// Generate a message-specific local path so media sent in the same second doesn't collide.
+	localPath = filepath.Join(chatDir, mediaDownloadFilename(messageID, filename))
 
 	// Get absolute path
 	absPath, err := filepath.Abs(localPath)
@@ -608,14 +636,15 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	}
 
 	// If we don't have all the media info we need, we can't download
-	if url == "" || len(mediaKey) == 0 || len(fileSHA256) == 0 || len(fileEncSHA256) == 0 || fileLength == 0 {
+	if directPath == "" {
+		directPath = extractDirectPathFromURL(url)
+	}
+
+	if directPath == "" || len(mediaKey) == 0 || len(fileSHA256) == 0 || len(fileEncSHA256) == 0 {
 		return false, "", "", "", fmt.Errorf("incomplete media information for download")
 	}
 
 	fmt.Printf("Attempting to download media for message %s in chat %s...\n", messageID, chatJID)
-
-	// Extract direct path from URL
-	directPath := extractDirectPathFromURL(url)
 
 	// Create a downloader that implements DownloadableMessage
 	var waMediaType whatsmeow.MediaType
@@ -628,6 +657,8 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 		waMediaType = whatsmeow.MediaAudio
 	case "document":
 		waMediaType = whatsmeow.MediaDocument
+	case "sticker":
+		waMediaType = whatsmeow.MediaImage
 	default:
 		return false, "", "", "", fmt.Errorf("unsupported media type: %s", mediaType)
 	}
@@ -659,8 +690,13 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 
 // Extract direct path from a WhatsApp media URL
 func extractDirectPathFromURL(url string) string {
-	// The direct path is typically in the URL, we need to extract it
-	// Example URL: https://mmg.whatsapp.net/v/t62.7118-24/13812002_698058036224062_3424455886509161511_n.enc?ccb=11-4&oh=...
+	if url == "" {
+		return ""
+	}
+
+	// The direct path includes the URL path and query string. whatsmeow appends
+	// hash and mms-type parameters, so stripping the query causes WhatsApp 403s.
+	// Example URL: https://mmg.whatsapp.net/v/t62...enc?ccb=11-4&oh=...
 
 	// Find the path part after the domain
 	parts := strings.SplitN(url, ".net/", 2)
@@ -670,11 +706,27 @@ func extractDirectPathFromURL(url string) string {
 
 	pathPart := parts[1]
 
-	// Remove query parameters
-	pathPart = strings.SplitN(pathPart, "?", 2)[0]
-
 	// Create proper direct path format
 	return "/" + pathPart
+}
+
+func mediaDownloadFilename(messageID, filename string) string {
+	filename = filepath.Base(filename)
+	if filename == "." || filename == string(filepath.Separator) || filename == "" {
+		filename = "media"
+	}
+
+	ext := filepath.Ext(filename)
+	base := strings.TrimSuffix(filename, ext)
+	safeMessageID := strings.NewReplacer("/", "_", "\\", "_", ":", "_").Replace(messageID)
+	if safeMessageID == "" || strings.Contains(base, safeMessageID) {
+		return filename
+	}
+
+	if base == "" {
+		base = "media"
+	}
+	return fmt.Sprintf("%s_%s%s", base, safeMessageID, ext)
 }
 
 // Start a REST API server to expose the WhatsApp client functionality
@@ -1121,12 +1173,12 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				}
 
 				// Extract media info
-				var mediaType, filename, url string
+				var mediaType, filename, url, directPath string
 				var mediaKey, fileSHA256, fileEncSHA256 []byte
 				var fileLength uint64
 
 				if msg.Message.Message != nil {
-					mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg.Message.Message)
+					mediaType, filename, url, directPath, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg.Message.Message)
 				}
 
 				// Log the message content for debugging
@@ -1179,6 +1231,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					mediaType,
 					filename,
 					url,
+					directPath,
 					mediaKey,
 					fileSHA256,
 					fileEncSHA256,
