@@ -33,6 +33,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+const restAPIPort = 8081
+
 // Message represents a chat message for our client
 type Message struct {
 	Time      time.Time
@@ -1015,7 +1017,7 @@ func main() {
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
 
 	// Start REST API server
-	startRESTServer(client, messageStore, 8080)
+	startRESTServer(client, messageStore, restAPIPort)
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)

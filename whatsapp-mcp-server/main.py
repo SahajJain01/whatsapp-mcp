@@ -7,6 +7,7 @@ from urllib.parse import quote, unquote
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import BlobResourceContents, EmbeddedResource, ImageContent, TextContent
+from message_transcripts import append_voice_note_transcripts
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
@@ -93,7 +94,7 @@ def list_messages(
     include_context: bool = True,
     context_before: int = 1,
     context_after: int = 1
-) -> List[Dict[str, Any]]:
+) -> str:
     """Get WhatsApp messages matching specified criteria with optional context.
     
     Args:
@@ -120,7 +121,7 @@ def list_messages(
         context_before=context_before,
         context_after=context_after
     )
-    return messages
+    return append_voice_note_transcripts(messages, whatsapp_transcribe_message)
 
 @mcp.tool()
 def list_chats(
