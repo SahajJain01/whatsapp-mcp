@@ -132,6 +132,37 @@ Write-Host "Updated $cfgPath"
 Write-Host "(Note: some Claude Desktop builds rewrite this file and may drop mcpServers; re-run this script if WhatsApp disappears.)" -ForegroundColor DarkYellow
 
 # ---------------------------------------------------------------------------
+Write-Step "Wiring into opencode config"
+$opencodeCfgDir  = Join-Path $env:USERPROFILE ".config\opencode"
+$opencodeCfgPath = Join-Path $opencodeCfgDir "opencode.json"
+if (-not (Test-Path $opencodeCfgDir)) { New-Item -ItemType Directory -Path $opencodeCfgDir | Out-Null }
+if (Test-Path $opencodeCfgPath) {
+    try {
+        $oc = Get-Content $opencodeCfgPath -Raw | ConvertFrom-Json
+    } catch {
+        Write-Host "Existing opencode.json is not valid JSON; starting fresh." -ForegroundColor DarkYellow
+        $oc = [PSCustomObject]@{}
+    }
+} else {
+    $oc = [PSCustomObject]@{}
+}
+$whatsappOc = [PSCustomObject]@{
+    type    = "local"
+    command = [string[]]@("uv", "run", "main.py")
+    cwd     = $serverDir
+    enabled = $true
+}
+if ($oc.PSObject.Properties.Name -contains "mcp") {
+    $oc.mcp | Add-Member -NotePropertyName "whatsapp" -NotePropertyValue $whatsappOc -Force
+} else {
+    $oc | Add-Member -NotePropertyName "mcp" -NotePropertyValue ([PSCustomObject]@{ whatsapp = $whatsappOc }) -Force
+}
+$ocJson = $oc | ConvertTo-Json -Depth 10
+[System.IO.File]::WriteAllText($opencodeCfgPath, $ocJson, (New-Object System.Text.UTF8Encoding($false)))
+Write-Host "Updated $opencodeCfgPath"
+Write-Host "Restart opencode to pick up the new MCP server." -ForegroundColor DarkYellow
+
+# ---------------------------------------------------------------------------
 Write-Step "First-time authentication"
 $storeDb = Join-Path $bridgeDir "store\whatsapp.db"
 if (Test-Path $storeDb) {
