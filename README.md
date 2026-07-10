@@ -127,7 +127,24 @@ This disables NIC offloads (LSO/RSC/checksum), lowers the MTU, and turns off a f
    ~/.cursor/mcp.json
    ```
 
-4. **Restart Claude Desktop / Cursor**
+   For **opencode** (global config), edit `~/.config/opencode/opencode.json` (Windows: `%USERPROFILE%\.config\opencode\opencode.json`) and merge in an `mcp` block:
+
+   ```json
+   {
+     "mcp": {
+       "whatsapp": {
+         "type": "local",
+         "command": ["uv", "run", "main.py"],
+         "cwd": "{{PATH_TO_SRC}}/whatsapp-mcp/whatsapp-mcp-server",
+         "enabled": true
+       }
+     }
+   }
+   ```
+
+   Then restart opencode — it does not hot-reload MCP config. On Windows, `setup.ps1` writes this file for you automatically.
+
+4. **Restart Claude Desktop / Cursor / opencode**
 
    Open Claude Desktop and you should now see WhatsApp as an available integration.
 
@@ -189,6 +206,7 @@ Claude can access the following tools to interact with WhatsApp:
 - **send_file**: Send a file (image, video, raw audio, document) to a specified recipient
 - **send_audio_message**: Send an audio file as a WhatsApp voice message (requires the file to be an .ogg opus file or ffmpeg must be installed)
 - **download_media**: Download media from a WhatsApp message and get the local file path
+- **transcribe_audio**: Transcribe a WhatsApp voice note or audio message and return the text plus detected language
 
 ### Media Handling Features
 
@@ -207,6 +225,28 @@ You can send various media types to your WhatsApp contacts:
 #### Media Downloading
 
 By default, just the metadata of the media is stored in the local database. The message will indicate that media was sent. To access this media you need to use the download_media tool which takes the `message_id` and `chat_jid` (which are shown when printing messages containing the meda), this downloads the media and then returns the file path which can be then opened or passed to another tool.
+
+#### Voice Note Transcription
+
+Use `transcribe_audio(message_id, chat_jid, language=None)` to get a text transcript of a WhatsApp voice message or any audio message. The tool reuses the same download pipeline as `download_media`, then feeds the resulting `.ogg` Opus file to a speech-to-text engine.
+
+Providers (selected by the `WHATSAPP_MCP_TRANSCRIBE_PROVIDER` env var):
+
+- **`local` (default)**: [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) on CPU (`int8`). First call downloads the `small` Whisper model (~460 MB) into the Hugging Face cache; subsequent calls are fast. Decoding uses bundled PyAV, so **no system ffmpeg is required** for transcription.
+- **`openai`**: OpenAI Whisper API. Requires `OPENAI_API_KEY` and installing the extra: `uv sync --extra openai`.
+
+Configuration:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `WHATSAPP_MCP_TRANSCRIBE_PROVIDER` | `local` | `local` \| `openai` |
+| `WHATSAPP_MCP_WHISPER_MODEL` | `small` | `tiny` \| `base` \| `small` \| `medium` \| `large-v3` |
+| `WHATSAPP_MCP_WHISPER_DEVICE` | `cpu` | `cpu` \| `cuda` |
+| `WHATSAPP_MCP_WHISPER_COMPUTE_TYPE` | `int8` | `int8` \| `float16` \| `float32` |
+| `WHATSAPP_MCP_OPENAI_MODEL` | `whisper-1` | OpenAI-side model id |
+| `OPENAI_API_KEY` | _unset_ | required when `PROVIDER=openai` |
+
+Non-audio messages return `{"success": false, "message": "Message is not an audio message (media_type=<type>)"}` without raising.
 
 ## Technical Details
 
