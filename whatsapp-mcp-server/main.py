@@ -21,6 +21,7 @@ from whatsapp import (
     send_audio_message as whatsapp_audio_voice_message,
     download_media as whatsapp_download_media
 )
+from transcribe import transcribe_message as whatsapp_transcribe_message
 
 # Initialize FastMCP server
 mcp = FastMCP("whatsapp")
@@ -376,6 +377,36 @@ def download_media(
         )
 
     return content
+
+@mcp.tool()
+def transcribe_audio(
+    message_id: str,
+    chat_jid: str,
+    language: Optional[str] = None
+) -> Dict[str, Any]:
+    """Transcribe a WhatsApp voice note or audio message and return the text.
+
+    Downloads the media via the local WhatsApp bridge (if not already cached)
+    and runs speech-to-text. The default provider is `faster-whisper`, which
+    runs 100% locally on CPU (int8) and does not require a system `ffmpeg`
+    install. To use the OpenAI Whisper API instead, set
+    `WHATSAPP_MCP_TRANSCRIBE_PROVIDER=openai` and `OPENAI_API_KEY`, and install
+    the extra via `uv sync --extra openai`.
+
+    Args:
+        message_id: The ID of the message containing the audio (same field
+            you would pass to `download_media`).
+        chat_jid: The JID of the chat containing the message.
+        language: Optional ISO-639-1 language hint (e.g. "en", "es"). If
+            omitted, the model auto-detects.
+
+    Returns:
+        A dictionary with `success`, `transcript`, `language`,
+        `duration_seconds`, `provider`, `model`, and a human-readable
+        `message`. For non-audio messages returns `success=false` with a
+        descriptive `message` rather than raising.
+    """
+    return whatsapp_transcribe_message(message_id, chat_jid, language)
 
 if __name__ == "__main__":
     # Initialize and run the server
