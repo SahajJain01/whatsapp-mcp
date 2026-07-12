@@ -1,4 +1,5 @@
-# Databases (local message store)
+# Local message store (databases + downloaded media)
+whatsapp-bridge/store/
 *.db
 
 # Local Claude Desktop config (machine-specific)
@@ -9,6 +10,7 @@ claude_desktop_config.json
 
 # Compiled bridge binary (built by setup.ps1 / go build)
 whatsapp-bridge/whatsapp-bridge.exe
+whatsapp-bridge/whatsapp-bridge
 *.exe
 
 # Diagnostic scratch
