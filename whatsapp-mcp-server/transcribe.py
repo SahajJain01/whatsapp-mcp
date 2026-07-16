@@ -23,7 +23,10 @@ import os
 import os.path
 import sqlite3
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Dict, Optional
+
+from transcript_cache import CacheEntry, CacheKey, TranscriptCache
 
 # Same path derivation as whatsapp.py so both modules stay in sync.
 MESSAGES_DB_PATH = os.path.join(
@@ -33,6 +36,7 @@ MESSAGES_DB_PATH = os.path.join(
     "store",
     "messages.db",
 )
+TRANSCRIPT_CACHE_PATH = Path(MESSAGES_DB_PATH).with_name("transcripts.db")
 
 # WhatsApp media_type strings that represent audio we can transcribe.
 # "audio" is what the current Go bridge emits; "ptt" is a plausible future
@@ -81,7 +85,7 @@ def _provider() -> str:
 
 
 def _local_model_name() -> str:
-    return (os.environ.get("WHATSAPP_MCP_WHISPER_MODEL") or "small").strip()
+    return (os.environ.get("WHATSAPP_MCP_WHISPER_MODEL") or "large-v3").strip()
 
 
 def _local_device() -> str:
@@ -266,6 +270,20 @@ def transcribe_message(
             ),
         }
 
+    provider = _provider()
+    model = _active_model_name()
+    cache_key = CacheKey(
+        message_id=message_id,
+        chat_jid=chat_jid,
+        provider=provider,
+        model=model,
+        language_hint=language or "",
+    )
+    cache = TranscriptCache.from_environment(TRANSCRIPT_CACHE_PATH)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return {**base, **cached.as_result(cache_key)}
+
     # Reuse the existing download pipeline. Local import avoids a hard cycle
     # (whatsapp.py doesn't import this module today, but keeping it local
     # also lets the tests inject a fake `whatsapp` module via sys.modules).
@@ -285,4 +303,22 @@ def transcribe_message(
         }
 
     result = transcribe_audio_file(file_path, language)
-    return {**base, **result, "file_path": file_path}
+    transcript = result.get("transcript")
+    if result.get("success") is True and isinstance(transcript, str):
+        detected_language = result.get("language")
+        duration_seconds = result.get("duration_seconds")
+        cache.put(
+            cache_key,
+            CacheEntry(
+                transcript=transcript,
+                detected_language=(
+                    detected_language if isinstance(detected_language, str) else None
+                ),
+                duration_seconds=(
+                    float(duration_seconds)
+                    if isinstance(duration_seconds, (int, float))
+                    else None
+                ),
+            ),
+        )
+    return {**base, **result, "file_path": file_path, "cached": False}

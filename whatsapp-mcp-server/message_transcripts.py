@@ -28,9 +28,14 @@ def append_voice_note_transcripts(
             match.group("message_id"),
             match.group("chat_jid"),
         )
+        separator = "" if line.endswith("\n") else "\n"
         transcript = result.get("transcript")
         if result.get("success") is True and isinstance(transcript, str) and transcript:
-            separator = "" if line.endswith("\n") else "\n"
             output_lines.append(f"{separator}Transcript: {transcript}\n")
+            continue
+
+        message = result.get("message")
+        reason = message if isinstance(message, str) and message else "empty transcript"
+        output_lines.append(f"{separator}Transcript unavailable: {reason}\n")
 
     return "".join(output_lines)

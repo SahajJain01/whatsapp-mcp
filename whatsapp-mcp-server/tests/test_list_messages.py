@@ -46,6 +46,23 @@ def test_list_messages_leaves_non_audio_messages_unchanged(monkeypatch):
     assert transcript_calls == []
 
 
+def test_list_messages_reports_transcription_failure(monkeypatch):
+    audio_message = (
+        "[audio - Message ID: msg-audio - Chat JID: chat-1@s.whatsapp.net] "
+        "<Media omitted>\n"
+    )
+    monkeypatch.setattr(main, "whatsapp_list_messages", lambda **_: audio_message)
+    monkeypatch.setattr(
+        main,
+        "whatsapp_transcribe_message",
+        lambda *_: {"success": False, "message": "local model unavailable"},
+    )
+
+    result = main.list_messages(include_context=False)
+
+    assert "Transcript unavailable: local model unavailable" in result
+
+
 def test_list_messages_forwards_existing_arguments(monkeypatch):
     forwarded: dict[str, str | int | bool | None] = {}
 

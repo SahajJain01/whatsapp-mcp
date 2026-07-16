@@ -10,11 +10,22 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 import transcribe
+
+
+@pytest.fixture(autouse=True)
+def isolate_transcript_cache(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        transcribe,
+        "TRANSCRIPT_CACHE_PATH",
+        tmp_path / "transcripts.db",
+        raising=False,
+    )
 
 
 # --- is_audio_media_type ----------------------------------------------------
@@ -68,7 +79,7 @@ def test_transcribe_message_dispatches_to_file(monkeypatch):
     # Inject a fake `whatsapp` module so the inner `import whatsapp` in
     # transcribe_message picks it up instead of the real module.
     fake_whatsapp = types.ModuleType("whatsapp")
-    fake_whatsapp.download_media = lambda *_: "C:/fake/voice.ogg"
+    setattr(fake_whatsapp, "download_media", lambda *_: "C:/fake/voice.ogg")
     monkeypatch.setitem(sys.modules, "whatsapp", fake_whatsapp)
 
     sentinel = {
@@ -98,6 +109,46 @@ def test_transcribe_message_dispatches_to_file(monkeypatch):
     assert result["file_path"] == "C:/fake/voice.ogg"
 
 
+def test_transcribe_message_reuses_cached_transcript(monkeypatch):
+    # Given
+    monkeypatch.setattr(transcribe, "get_message_media_type", lambda *_: "audio")
+    download_calls: list[tuple[str, str]] = []
+    transcribe_calls: list[tuple[str, str | None]] = []
+    fake_whatsapp = types.ModuleType("whatsapp")
+
+    def fake_download(message_id: str, chat_jid: str) -> str:
+        download_calls.append((message_id, chat_jid))
+        return "C:/fake/voice.ogg"
+
+    setattr(fake_whatsapp, "download_media", fake_download)
+    monkeypatch.setitem(sys.modules, "whatsapp", fake_whatsapp)
+
+    def fake_file(path: str, language: str | None = None):
+        transcribe_calls.append((path, language))
+        return {
+            "success": True,
+            "transcript": "cached voice note",
+            "language": "en",
+            "duration_seconds": 2.5,
+            "provider": "local",
+            "model": "large-v3",
+            "message": "Transcribed via faster-whisper",
+        }
+
+    monkeypatch.setattr(transcribe, "transcribe_audio_file", fake_file)
+
+    # When
+    first = transcribe.transcribe_message("m-cache", "chat@s.whatsapp.net")
+    second = transcribe.transcribe_message("m-cache", "chat@s.whatsapp.net")
+
+    # Then
+    assert download_calls == [("m-cache", "chat@s.whatsapp.net")]
+    assert transcribe_calls == [("C:/fake/voice.ogg", None)]
+    assert first["cached"] is False
+    assert second["cached"] is True
+    assert second["transcript"] == "cached voice note"
+
+
 # --- _local_model singleton -------------------------------------------------
 
 
@@ -105,7 +156,7 @@ def test_local_model_singleton_cached(monkeypatch):
     """Model is instantiated at most once per env config (lru_cache)."""
     fake_module = types.ModuleType("faster_whisper")
     constructor = MagicMock(return_value=MagicMock(name="WhisperModel"))
-    fake_module.WhisperModel = constructor
+    setattr(fake_module, "WhisperModel", constructor)
     monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
 
     transcribe._local_model.cache_clear()
@@ -119,13 +170,18 @@ def test_local_model_singleton_cached(monkeypatch):
         transcribe._local_model.cache_clear()
 
 
+def test_local_model_defaults_to_large_v3(monkeypatch):
+    monkeypatch.delenv("WHATSAPP_MCP_WHISPER_MODEL", raising=False)
+    assert transcribe._local_model_name() == "large-v3"
+
+
 # --- provider selection -----------------------------------------------------
 
 
 def test_provider_selection_dispatches_to_openai(monkeypatch):
     """S5: WHATSAPP_MCP_TRANSCRIBE_PROVIDER=openai routes to the OpenAI path."""
-    local_calls: list = []
-    openai_calls: list = []
+    local_calls: list[tuple[str, str | None]] = []
+    openai_calls: list[tuple[str, str | None]] = []
 
     monkeypatch.setenv("WHATSAPP_MCP_TRANSCRIBE_PROVIDER", "openai")
     monkeypatch.setattr(

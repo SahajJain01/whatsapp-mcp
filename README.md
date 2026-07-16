@@ -26,20 +26,22 @@ powershell -ExecutionPolicy Bypass -File .\setup.ps1
 
 `setup.ps1` is idempotent and does everything:
 
-- Installs **Go**, **MSYS2 + GCC** (for CGO/go-sqlite3), and **uv** via `winget` (skips any already present)
-- Enables CGO and **builds** `whatsapp-bridge.exe`
-- Runs `uv sync` to prepare the Python MCP server
-- Registers a **hidden auto-start scheduled task** (`WhatsAppBridge`) so the bridge runs with no window and starts on every login
-- Wires the server into **Claude Desktop**'s `claude_desktop_config.json`
+- Installs **Go**, **MSYS2 + GCC**, **uv**, and **FFmpeg** via `winget` (skips any already present)
+- Copies the application to `%USERPROFILE%\mcp\whatsapp-mcp` and builds `whatsapp-bridge.exe` there
+- Runs `uv sync` and prepares the local Whisper `large-v3` model
+- Registers a hidden supervised task (`WhatsAppMCPBridge`) that restarts the bridge after failures and starts it after every Windows sign-in
+- Prompts you to configure **Codex**, **Claude Desktop**, **OpenCode**, any combination of them, or none
 - Opens a window **once** to scan the WhatsApp QR code (only the first time)
+- Registers **WhatsApp MCP** in Windows Installed apps with an uninstaller beside the bridge binary
 
-After it finishes, restart Claude Desktop and try *"search my WhatsApp contacts"*.
+After it finishes, restart the MCP client(s) you selected and try *"search my WhatsApp contacts"*.
 
 ### Managing the hidden bridge
 
-- **Stop:** `Stop-ScheduledTask -TaskName WhatsAppBridge; Get-Process whatsapp-bridge | Stop-Process`
-- **Disable auto-start:** `Disable-ScheduledTask -TaskName WhatsAppBridge`
-- **Re-authenticate** (WhatsApp expires linked devices ~every 20 days): double-click `whatsapp-bridge\run-bridge.ps1`, scan the QR once, close the window — the hidden task takes over again.
+- **Stop:** `Stop-ScheduledTask -TaskName WhatsAppMCPBridge; Get-Process whatsapp-bridge | Stop-Process`
+- **Disable auto-start:** `Disable-ScheduledTask -TaskName WhatsAppMCPBridge`
+- **Re-authenticate:** run `%USERPROFILE%\mcp\whatsapp-mcp\whatsapp-bridge\run-bridge.ps1`, scan the QR, then start the task again.
+- **Uninstall:** use Windows Settings > Apps > Installed apps > WhatsApp MCP, or run `%USERPROFILE%\mcp\whatsapp-mcp\whatsapp-bridge\uninstall.ps1`.
 
 ### Network workaround baked into the bridge
 
@@ -228,11 +230,11 @@ By default, just the metadata of the media is stored in the local database. The 
 
 #### Voice Note Transcription
 
-Use `transcribe_audio(message_id, chat_jid, language=None)` to get a text transcript of a WhatsApp voice message or any audio message. The tool reuses the same download pipeline as `download_media`, then feeds the resulting `.ogg` Opus file to a speech-to-text engine.
+`list_messages` automatically returns a transcript directly below every voice note or audio message. The transcript is persisted locally, so later tool calls reuse it without downloading or transcribing the audio again. `transcribe_audio(message_id, chat_jid, language=None)` remains available for direct requests.
 
 Providers (selected by the `WHATSAPP_MCP_TRANSCRIBE_PROVIDER` env var):
 
-- **`local` (default)**: [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) on CPU (`int8`). First call downloads the `small` Whisper model (~460 MB) into the Hugging Face cache; subsequent calls are fast. Decoding uses bundled PyAV, so **no system ffmpeg is required** for transcription.
+- **`local` (default)**: [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) on CPU (`int8`) with the `large-v3` model. Windows setup downloads the model during installation. Decoding uses bundled PyAV, so **no system ffmpeg is required** for transcription.
 - **`openai`**: OpenAI Whisper API. Requires `OPENAI_API_KEY` and installing the extra: `uv sync --extra openai`.
 
 Configuration:
@@ -240,11 +242,13 @@ Configuration:
 | Variable | Default | Notes |
 |---|---|---|
 | `WHATSAPP_MCP_TRANSCRIBE_PROVIDER` | `local` | `local` \| `openai` |
-| `WHATSAPP_MCP_WHISPER_MODEL` | `small` | `tiny` \| `base` \| `small` \| `medium` \| `large-v3` |
+| `WHATSAPP_MCP_WHISPER_MODEL` | `large-v3` | `tiny` \| `base` \| `small` \| `medium` \| `large-v3` |
 | `WHATSAPP_MCP_WHISPER_DEVICE` | `cpu` | `cpu` \| `cuda` |
 | `WHATSAPP_MCP_WHISPER_COMPUTE_TYPE` | `int8` | `int8` \| `float16` \| `float32` |
 | `WHATSAPP_MCP_OPENAI_MODEL` | `whisper-1` | OpenAI-side model id |
 | `OPENAI_API_KEY` | _unset_ | required when `PROVIDER=openai` |
+| `WHATSAPP_MCP_TRANSCRIPT_CACHE_DAYS` | `30` | Remove entries not used within this many days |
+| `WHATSAPP_MCP_TRANSCRIPT_CACHE_MAX_ENTRIES` | `1000` | Keep only the most recently used transcripts; set `0` to disable caching |
 
 Non-audio messages return `{"success": false, "message": "Message is not an audio message (media_type=<type>)"}` without raising.
 
