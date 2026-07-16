@@ -2,9 +2,6 @@
 whatsapp-bridge/store/
 *.db
 
-# Local Claude Desktop config (machine-specific)
-claude_desktop_config.json
-
 # Logs
 *.log
 
