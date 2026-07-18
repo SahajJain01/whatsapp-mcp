@@ -284,9 +284,9 @@ if (-not (Test-Path -LiteralPath $sessionDb)) {
 
 Write-Step "Registering the persistent bridge task"
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-$supervisor = Join-Path $bridgeDir "run-bridge-supervisor.ps1"
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument (
-    "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$supervisor`""
+$hiddenLauncher = Join-Path $bridgeDir "run-bridge-hidden.vbs"
+$action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument (
+    "//B //NoLogo `"$hiddenLauncher`""
 )
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
