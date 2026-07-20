@@ -1,276 +1,375 @@
-# WhatsApp MCP Server
+# WhatsApp MCP Server — maintained fork
 
-This is a Model Context Protocol (MCP) server for WhatsApp.
+Connect an MCP-compatible AI client to your personal WhatsApp account. Search chats and contacts, read message history, send messages and files, download media, and transcribe voice notes while keeping the bridge and its databases on your machine.
 
-With this you can search and read your personal Whatsapp messages (including images, videos, documents, and audio messages), search your contacts and send messages to either individuals or groups. You can also send media files including images, videos, documents, and audio messages.
+> [!IMPORTANT]
+> This is a maintained fork of [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp). The upstream public `main` branch last changed on July 13, 2025; this fork continues the project with compatibility fixes, a persistent Windows installer, richer media support, and voice-note transcription.
 
-It connects to your **personal WhatsApp account** directly via the Whatsapp web multidevice API (using the [whatsmeow](https://github.com/tulir/whatsmeow) library). All your messages are stored locally in a SQLite database and only sent to an LLM (such as Claude) when the agent accesses them through tools (which you control).
+> [!NOTE]
+> **Development transparency:** the fork-specific fixes and features were vibe-coded: implemented with substantial AI assistance, iterated against real failures, supported by regression tests, and used in the maintainer's working installation. This is community software, so review the code and security notes before connecting an important account.
 
-Here's an example of what you can do when it's connected to Claude.
+![WhatsApp MCP example](./example-use.png)
 
-![WhatsApp MCP](./example-use.png)
+## What this fork adds
 
-> To get updates on this and other projects I work on [enter your email here](https://docs.google.com/forms/d/1rTF9wMBTN0vPfzWuQa2BjfGKdKIpTbyeKxhPMcEzgyI/preview)
+- **Current WhatsApp compatibility:** an updated [`whatsmeow`](https://github.com/tulir/whatsmeow) dependency avoids the `405 Client outdated` failure seen with the old pin.
+- **More reliable connections:** the bridge uses IPv4, HTTP/1.1, and a bounded TLS-handshake retry for networks and virtual machines that black-hole the first connection attempt.
+- **Local-only bridge API:** the Go REST bridge listens on `127.0.0.1:8081`, not on every network interface.
+- **Automated Windows setup:** one PowerShell script installs prerequisites, builds the bridge, prepares Python dependencies and the Whisper model, configures supported MCP clients, registers hidden supervised startup, and adds an uninstaller.
+- **Persistent Windows operation:** the bridge starts after sign-in without a visible PowerShell window and restarts after a failure.
+- **Usable incoming media:** messages include media metadata; media can be downloaded on demand and exposed to clients through tool results or an MCP resource.
+- **Voice-note transcription:** `list_messages` can append transcripts automatically, while `transcribe_audio` supports explicit transcription through local `faster-whisper` or the OpenAI API.
+- **Persistent transcript cache:** completed transcripts are reused across MCP calls and pruned with configurable age and size limits.
+- **Broader client setup:** automated configuration for Codex, Claude Desktop, and OpenCode, plus manual instructions for Cursor and other stdio MCP clients.
+- **Regression coverage:** tests protect the bridge port, automatic transcription, provider selection, transcript caching, and hidden Windows startup.
 
-> *Caution:* as with many MCP servers, the WhatsApp MCP is subject to [the lethal trifecta](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/). This means that project injection could lead to private data exfiltration.
+## Security and privacy
 
-## Quick setup on Windows (automated)
+The bridge connects to your **personal WhatsApp account** through WhatsApp's web multi-device protocol using `whatsmeow`. It is not affiliated with or endorsed by WhatsApp or Meta.
 
-If you're on Windows (including a KVM/QEMU VM like this fork was set up on), you can skip the manual steps below and run the bundled script:
+- Chat metadata and message history are stored locally in SQLite under `whatsapp-bridge/store/`.
+- Media bytes are downloaded only when requested. Transcripts are cached locally in `transcripts.db`.
+- The MCP server sends data to the configured AI client when that client invokes a tool. The optional OpenAI transcription provider also uploads the selected audio to OpenAI.
+- The local databases are sensitive and are not encrypted by this project. Protect your OS account and backups, and never commit `whatsapp-bridge/store/`.
+- Do not expose port `8081` through port forwarding, a reverse proxy, or a public bind.
+- Messages are untrusted input. A prompt-injection message could influence an agent that can read data or send messages, a form of the [lethal trifecta](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/). Review tool calls and grant only the access you need.
+- WhatsApp can change its protocol or policies at any time. Use this unofficial integration at your own risk.
+
+## How it works
+
+```mermaid
+flowchart LR
+    Client["MCP client<br/>Codex / Claude / Cursor / OpenCode"] <-->|"stdio"| MCP["Python MCP server"]
+    MCP -->|"read/search"| Messages[("messages.db")]
+    MCP -->|"send/download<br/>127.0.0.1:8081"| Bridge["Go WhatsApp bridge"]
+    Bridge <--> WhatsApp["WhatsApp multi-device API"]
+    Bridge --> Messages
+    Bridge --> Session[("whatsapp.db")]
+    MCP --> Transcripts[("transcripts.db")]
+```
+
+- **Go bridge (`whatsapp-bridge/`)** authenticates with a QR code, receives and stores messages, sends messages and media, downloads incoming media, and exposes a loopback-only REST API.
+- **Python MCP server (`whatsapp-mcp-server/`)** runs over stdio, reads the local message database for searches, calls the bridge for write/download operations, and exposes the MCP tools and media resource.
+
+The bridge must be running whenever you use tools that send or download data. Search and history tools read the locally synchronized database.
+
+## Quick start: Windows
+
+The automated installer is the recommended path on Windows 10/11. It requires [`winget`](https://learn.microsoft.com/windows/package-manager/winget/) and a WhatsApp mobile device for the initial QR scan.
+
+Open PowerShell:
 
 ```powershell
-git clone https://github.com/<your-account>/whatsapp-mcp.git
+git clone https://github.com/SahajJain01/whatsapp-mcp.git
 cd whatsapp-mcp
 powershell -ExecutionPolicy Bypass -File .\setup.ps1
 ```
 
-`setup.ps1` is idempotent and does everything:
+The installer is safe to run again and will:
 
-- Installs **Go**, **MSYS2 + GCC**, **uv**, and **FFmpeg** via `winget` (skips any already present)
-- Copies the application to `%USERPROFILE%\mcp\whatsapp-mcp` and builds `whatsapp-bridge.exe` there
-- Runs `uv sync` and prepares the local Whisper `large-v3` model
-- Registers a hidden supervised task (`WhatsAppMCPBridge`) that restarts the bridge after failures and starts it after every Windows sign-in
-- Prompts you to configure **Codex**, **Claude Desktop**, **OpenCode**, any combination of them, or none
-- Opens a window **once** to scan the WhatsApp QR code (only the first time)
-- Registers **WhatsApp MCP** in Windows Installed apps with an uninstaller beside the bridge binary
+1. Install Go, MSYS2/GCC, `uv`, and FFmpeg when missing.
+2. Copy the app to `%USERPROFILE%\mcp\whatsapp-mcp` without overwriting the local message store.
+3. Enable CGO and build `whatsapp-bridge.exe`.
+4. Run `uv sync` and download the default `faster-whisper` `large-v3` model.
+5. Open the bridge once for WhatsApp's QR-code authentication.
+6. Register the hidden, supervised `WhatsAppMCPBridge` scheduled task at sign-in.
+7. Offer to configure Codex, Claude Desktop, OpenCode, any combination of them, or none.
+8. Register WhatsApp MCP in Windows Installed apps with an uninstaller.
 
-After it finishes, restart the MCP client(s) you selected and try *"search my WhatsApp contacts"*.
-
-### Managing the hidden bridge
-
-- **Stop:** `Stop-ScheduledTask -TaskName WhatsAppMCPBridge; Get-Process whatsapp-bridge | Stop-Process`
-- **Disable auto-start:** `Disable-ScheduledTask -TaskName WhatsAppMCPBridge`
-- **Re-authenticate:** run `%USERPROFILE%\mcp\whatsapp-mcp\whatsapp-bridge\run-bridge.ps1`, scan the QR, then start the task again.
-- **Uninstall:** use Windows Settings > Apps > Installed apps > WhatsApp MCP, or run `%USERPROFILE%\mcp\whatsapp-mcp\whatsapp-bridge\uninstall.ps1`.
-
-### Network workaround baked into the bridge
-
-This fork's `whatsapp-bridge/main.go` includes a fix for hosts (notably some VMs) where the default WhatsApp connection hangs:
-
-- Forces **IPv4** (the IPv6 path on these hosts accepts the TCP connection but drops data)
-- Forces **HTTP/1.1** (HTTP/2's larger TLS handshake gets black-holed)
-- **Retries the TLS handshake** (the first handshake to a new host is silently dropped and times out at ~15s; a retry succeeds in <100ms)
-
-You'll see one `TLS handshake failed (attempt 1), retrying` warning on startup — that's expected and harmless. On a normal network these workarounds are no-ops.
-
-It also upgrades `whatsmeow` to a current version (the original pin was rejected by WhatsApp with a `405 Client outdated` error).
-
-### Optional: fix the networking for *all* apps (VirtIO VMs)
-
-The bridge workaround above only fixes the bridge. If the **whole VM** has flaky TLS (Microsoft Store stuck on "checking dependencies", HTTP/2 hanging, `gh`/Go tools timing out), the cause is usually a VirtIO NIC hardware-offload bug on the host. Fix it system-wide with:
+To choose clients without the interactive prompt:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\fix-vm-networking.ps1
+powershell -ExecutionPolicy Bypass -File .\setup.ps1 -McpClients Codex,ClaudeDesktop,OpenCode
 ```
 
-This disables NIC offloads (LSO/RSC/checksum), lowers the MTU, and turns off a few TCP features that trigger the bug. It's persistent across reboots and reversible (revert block is at the bottom of the script). Run it elevated.
+To postpone the large local model download:
 
-## Installation
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup.ps1 -SkipModelDownload
+```
+
+Restart every client configured by the installer, then try:
+
+> Search my WhatsApp contacts.
+
+### Manage the Windows installation
+
+Run these commands in PowerShell:
+
+```powershell
+# Start the background bridge
+Start-ScheduledTask -TaskName WhatsAppMCPBridge
+
+# Stop it
+Stop-ScheduledTask -TaskName WhatsAppMCPBridge
+Get-Process whatsapp-bridge -ErrorAction SilentlyContinue | Stop-Process
+
+# Disable or re-enable startup at sign-in
+Disable-ScheduledTask -TaskName WhatsAppMCPBridge
+Enable-ScheduledTask -TaskName WhatsAppMCPBridge
+
+# Run visibly for logs and diagnostics
+& "$env:USERPROFILE\mcp\whatsapp-mcp\whatsapp-bridge\run-bridge.ps1"
+```
+
+Uninstall from **Settings > Apps > Installed apps > WhatsApp MCP**, or run:
+
+```powershell
+& "$env:USERPROFILE\mcp\whatsapp-mcp\whatsapp-bridge\uninstall.ps1"
+```
+
+The uninstaller asks for explicit confirmation and then removes the installed copy, including its local WhatsApp data store. Back up `store/` first if you want to keep that data.
+
+## Manual installation
+
+Use this path on macOS/Linux or when you do not want the automated Windows service setup.
 
 ### Prerequisites
 
-- Go
-- Python 3.6+
-- Anthropic Claude Desktop app (or Cursor)
-- UV (Python package manager), install with `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- FFmpeg (_optional_) - Only needed for audio messages. If you want to send audio files as playable WhatsApp voice messages, they must be in `.ogg` Opus format. With FFmpeg installed, the MCP server will automatically convert non-Opus audio files. Without FFmpeg, you can still send raw audio files using the `send_file` tool.
+- [Go 1.25+](https://go.dev/doc/install)
+- [Python 3.11+](https://www.python.org/downloads/) (or let `uv` download a compatible Python)
+- [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
+- A C compiler with CGO support for SQLite:
+  - Linux: GCC or Clang and the usual build tools
+  - macOS: Xcode Command Line Tools
+  - Windows: [MSYS2](https://www.msys2.org/) with `C:\msys64\ucrt64\bin` on `PATH`
+- An MCP client that can launch a local stdio server
+- FFmpeg only if you want `send_audio_message` to convert MP3/WAV/other formats into WhatsApp-compatible Ogg Opus voice messages. Local transcription uses PyAV and does not require system FFmpeg.
 
-### Steps
+### 1. Clone this fork
 
-1. **Clone this repository**
+```bash
+git clone https://github.com/SahajJain01/whatsapp-mcp.git
+cd whatsapp-mcp
+```
 
-   ```bash
-   git clone https://github.com/lharries/whatsapp-mcp.git
-   cd whatsapp-mcp
-   ```
+### 2. Install the Python environment
 
-2. **Run the WhatsApp bridge**
+```bash
+uv sync --project whatsapp-mcp-server
+```
 
-   Navigate to the whatsapp-bridge directory and run the Go application:
+The default install includes local `faster-whisper`. To enable OpenAI transcription too:
 
-   ```bash
-   cd whatsapp-bridge
-   go run main.go
-   ```
+```bash
+uv sync --project whatsapp-mcp-server --extra openai
+```
 
-   The first time you run it, you will be prompted to scan a QR code. Scan the QR code with your WhatsApp mobile app to authenticate.
+### 3. Start the WhatsApp bridge
 
-   After approximately 20 days, you will might need to re-authenticate.
+On macOS/Linux:
 
-3. **Connect to the MCP server**
+```bash
+cd whatsapp-bridge
+CGO_ENABLED=1 go run .
+```
 
-   Copy the below json with the appropriate {{PATH}} values:
+On Windows PowerShell after installing MSYS2/GCC:
 
-   ```json
-   {
-     "mcpServers": {
-       "whatsapp": {
-         "command": "{{PATH_TO_UV}}", // Run `which uv` and place the output here
-         "args": [
-           "--directory",
-           "{{PATH_TO_SRC}}/whatsapp-mcp/whatsapp-mcp-server", // cd into the repo, run `pwd` and enter the output here + "/whatsapp-mcp-server"
-           "run",
-           "main.py"
-         ]
-       }
-     }
-   }
-   ```
+```powershell
+$env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
+$env:CGO_ENABLED = "1"
+Set-Location .\whatsapp-bridge
+go run .
+```
 
-   For **Claude**, save this as `claude_desktop_config.json` in your Claude Desktop configuration directory at:
+On first launch, open **WhatsApp > Settings > Linked devices > Link a device** on your phone and scan the terminal QR code. Leave the bridge running. A returning authenticated session reconnects without another QR scan.
 
-   ```
-   ~/Library/Application Support/Claude/claude_desktop_config.json
-   ```
+### 4. Configure an MCP client
 
-   For **Cursor**, save this as `mcp.json` in your Cursor configuration directory at:
+Resolve the absolute paths before configuring a client:
 
-   ```
-   ~/.cursor/mcp.json
-   ```
+```bash
+command -v uv
+cd whatsapp-mcp-server && pwd
+```
 
-   For **opencode** (global config), edit `~/.config/opencode/opencode.json` (Windows: `%USERPROFILE%\.config\opencode\opencode.json`) and merge in an `mcp` block:
+On Windows PowerShell, use `Get-Command uv` and `(Resolve-Path .\whatsapp-mcp-server).Path` instead.
 
-   ```json
-   {
-     "mcp": {
-       "whatsapp": {
-         "type": "local",
-         "command": ["uv", "run", "main.py"],
-         "cwd": "{{PATH_TO_SRC}}/whatsapp-mcp/whatsapp-mcp-server",
-         "enabled": true
-       }
-     }
-   }
-   ```
+#### Codex
 
-   Then restart opencode — it does not hot-reload MCP config. On Windows, `setup.ps1` writes this file for you automatically.
+```bash
+codex mcp add whatsapp -- /absolute/path/to/uv --directory /absolute/path/to/whatsapp-mcp-server run main.py
+```
 
-4. **Restart Claude Desktop / Cursor / opencode**
+The Windows installer runs the equivalent command automatically when Codex is selected.
 
-   Open Claude Desktop and you should now see WhatsApp as an available integration.
+#### Claude Desktop or Cursor
 
-   Or restart Cursor.
+Merge this entry into the client's MCP configuration, replacing both absolute paths:
 
-### Windows Compatibility
+```json
+{
+  "mcpServers": {
+    "whatsapp": {
+      "command": "/absolute/path/to/uv",
+      "args": [
+        "--directory",
+        "/absolute/path/to/whatsapp-mcp-server",
+        "run",
+        "main.py"
+      ]
+    }
+  }
+}
+```
 
-If you're running this project on Windows, be aware that `go-sqlite3` requires **CGO to be enabled** in order to compile and work properly. By default, **CGO is disabled on Windows**, so you need to explicitly enable it and have a C compiler installed.
+Common configuration locations:
 
-#### Steps to get it working:
+- Claude Desktop on Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+- Claude Desktop on macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Cursor: `~/.cursor/mcp.json` or the project-level `.cursor/mcp.json`
 
-1. **Install a C compiler**  
-   We recommend using [MSYS2](https://www.msys2.org/) to install a C compiler for Windows. After installing MSYS2, make sure to add the `ucrt64\bin` folder to your `PATH`.  
-   → A step-by-step guide is available [here](https://code.visualstudio.com/docs/cpp/config-mingw).
+#### OpenCode
 
-2. **Enable CGO and run the app**
+Merge this entry into `~/.config/opencode/opencode.json` (Windows: `%USERPROFILE%\.config\opencode\opencode.json`):
 
-   ```bash
-   cd whatsapp-bridge
-   go env -w CGO_ENABLED=1
-   go run main.go
-   ```
+```json
+{
+  "mcp": {
+    "whatsapp": {
+      "type": "local",
+      "command": ["/absolute/path/to/uv", "run", "main.py"],
+      "cwd": "/absolute/path/to/whatsapp-mcp-server",
+      "enabled": true
+    }
+  }
+}
+```
 
-Without this setup, you'll likely run into errors like:
+Restart the client after changing its configuration. Most clients do not hot-reload MCP servers.
 
-> `Binary was compiled with 'CGO_ENABLED=0', go-sqlite3 requires cgo to work.`
+## MCP tools
 
-## Architecture Overview
+| Tool | Purpose |
+|---|---|
+| `search_contacts` | Search contacts by name or phone number. |
+| `list_messages` | List messages with chat, sender, date, and pagination filters; automatically append voice-note transcripts. |
+| `list_chats` | List chats with metadata and optional filters. |
+| `get_chat` | Get one chat by JID. |
+| `get_direct_chat_by_contact` | Find the direct chat for a contact. |
+| `get_contact_chats` | List chats involving a contact. |
+| `get_last_interaction` | Return the most recent message involving a contact. |
+| `get_message_context` | Return messages around a selected message. |
+| `send_message` | Send text to a phone number or group JID. |
+| `send_file` | Send an image, video, raw audio file, or document. |
+| `send_audio_message` | Send an Ogg Opus voice message, converting other audio formats with FFmpeg. |
+| `download_media` | Download media for a message and return metadata plus client-readable content when supported. |
+| `transcribe_audio` | Transcribe a selected voice note/audio message with a local or OpenAI provider. |
 
-This application consists of two main components:
+Clients that support MCP resources can also read downloaded content through:
 
-1. **Go WhatsApp Bridge** (`whatsapp-bridge/`): A Go application that connects to WhatsApp's web API, handles authentication via QR code, and stores message history in SQLite. It serves as the bridge between WhatsApp and the MCP server.
+```text
+whatsapp-media://{chat_jid}/{message_id}
+```
 
-2. **Python MCP Server** (`whatsapp-mcp-server/`): A Python server implementing the Model Context Protocol (MCP), which provides standardized tools for Claude to interact with WhatsApp data and send/receive messages.
+### Media behavior
 
-### Data Storage
+- Incoming images, video, audio, documents, and stickers are recorded as message metadata.
+- `download_media` needs the `message_id` and `chat_jid` shown in message results. It downloads the bytes only when requested.
+- `send_file` sends common image/video/audio/document formats.
+- `send_audio_message` produces a WhatsApp-style voice message. Ogg Opus works directly; other formats require FFmpeg conversion.
 
-- All message history is stored in a SQLite database within the `whatsapp-bridge/store/` directory
-- The database maintains tables for chats and messages
-- Messages are indexed for efficient searching and retrieval
+## Voice-note transcription
 
-## Usage
+`list_messages` automatically places a transcript below each audio/voice-note result. `transcribe_audio(message_id, chat_jid, language=None)` is available for explicit requests. Successful transcripts are cached locally, keyed by message, provider, model, and language hint.
 
-Once connected, you can interact with your WhatsApp contacts through Claude, leveraging Claude's AI capabilities in your WhatsApp conversations.
+### Providers
 
-### MCP Tools
+- **Local (default):** `faster-whisper`, model `large-v3`, CPU, `int8`. The first model download is large; Windows setup downloads it up front unless `-SkipModelDownload` is used.
+- **OpenAI:** install the `openai` extra, set `WHATSAPP_MCP_TRANSCRIBE_PROVIDER=openai`, and provide `OPENAI_API_KEY`. Selected audio is sent to the configured OpenAI transcription model.
 
-Claude can access the following tools to interact with WhatsApp:
+Set variables in the environment inherited by your MCP client, or in that client's supported MCP environment configuration.
 
-- **search_contacts**: Search for contacts by name or phone number
-- **list_messages**: Retrieve messages with optional filters and context
-- **list_chats**: List available chats with metadata
-- **get_chat**: Get information about a specific chat
-- **get_direct_chat_by_contact**: Find a direct chat with a specific contact
-- **get_contact_chats**: List all chats involving a specific contact
-- **get_last_interaction**: Get the most recent message with a contact
-- **get_message_context**: Retrieve context around a specific message
-- **send_message**: Send a WhatsApp message to a specified phone number or group JID
-- **send_file**: Send a file (image, video, raw audio, document) to a specified recipient
-- **send_audio_message**: Send an audio file as a WhatsApp voice message (requires the file to be an .ogg opus file or ffmpeg must be installed)
-- **download_media**: Download media from a WhatsApp message and get the local file path
-- **transcribe_audio**: Transcribe a WhatsApp voice note or audio message and return the text plus detected language
+| Variable | Default | Description |
+|---|---:|---|
+| `WHATSAPP_MCP_TRANSCRIBE_PROVIDER` | `local` | `local` or `openai` |
+| `WHATSAPP_MCP_WHISPER_MODEL` | `large-v3` | Local faster-whisper model name |
+| `WHATSAPP_MCP_WHISPER_DEVICE` | `cpu` | Common values: `cpu`, `cuda` |
+| `WHATSAPP_MCP_WHISPER_COMPUTE_TYPE` | `int8` | Common values: `int8`, `float16`, `float32` |
+| `WHATSAPP_MCP_OPENAI_MODEL` | `whisper-1` | OpenAI transcription model ID |
+| `OPENAI_API_KEY` | unset | Required only for the OpenAI provider |
+| `WHATSAPP_MCP_TRANSCRIPT_CACHE_DAYS` | `30` | Delete cache entries not accessed within this many days |
+| `WHATSAPP_MCP_TRANSCRIPT_CACHE_MAX_ENTRIES` | `1000` | Retain the most recently used entries; `0` disables caching |
 
-### Media Handling Features
+A missing or non-audio message returns a structured `success: false` result instead of terminating the MCP server.
 
-The MCP server supports both sending and receiving various media types:
+## Local data
 
-#### Media Sending
+Runtime data lives under `whatsapp-bridge/store/`:
 
-You can send various media types to your WhatsApp contacts:
+| File | Contents |
+|---|---|
+| `messages.db` | Synchronized chats, message text, timestamps, senders, and media metadata |
+| `whatsapp.db` | WhatsApp linked-device session state |
+| `transcripts.db` | Cached voice-note transcripts and cache metadata |
 
-- **Images, Videos, Documents**: Use the `send_file` tool to share any supported media type.
-- **Voice Messages**: Use the `send_audio_message` tool to send audio files as playable WhatsApp voice messages.
-  - For optimal compatibility, audio files should be in `.ogg` Opus format.
-  - With FFmpeg installed, the system will automatically convert other audio formats (MP3, WAV, etc.) to the required format.
-  - Without FFmpeg, you can still send raw audio files using the `send_file` tool, but they won't appear as playable voice messages.
+The Windows installer preserves this directory when updating the installed copy. The uninstaller removes it after explicit confirmation, so back it up first if you want to retain it.
 
-#### Media Downloading
-
-By default, just the metadata of the media is stored in the local database. The message will indicate that media was sent. To access this media you need to use the download_media tool which takes the `message_id` and `chat_jid` (which are shown when printing messages containing the meda), this downloads the media and then returns the file path which can be then opened or passed to another tool.
-
-#### Voice Note Transcription
-
-`list_messages` automatically returns a transcript directly below every voice note or audio message. The transcript is persisted locally, so later tool calls reuse it without downloading or transcribing the audio again. `transcribe_audio(message_id, chat_jid, language=None)` remains available for direct requests.
-
-Providers (selected by the `WHATSAPP_MCP_TRANSCRIBE_PROVIDER` env var):
-
-- **`local` (default)**: [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) on CPU (`int8`) with the `large-v3` model. Windows setup downloads the model during installation. Decoding uses bundled PyAV, so **no system ffmpeg is required** for transcription.
-- **`openai`**: OpenAI Whisper API. Requires `OPENAI_API_KEY` and installing the extra: `uv sync --extra openai`.
-
-Configuration:
-
-| Variable | Default | Notes |
-|---|---|---|
-| `WHATSAPP_MCP_TRANSCRIBE_PROVIDER` | `local` | `local` \| `openai` |
-| `WHATSAPP_MCP_WHISPER_MODEL` | `large-v3` | `tiny` \| `base` \| `small` \| `medium` \| `large-v3` |
-| `WHATSAPP_MCP_WHISPER_DEVICE` | `cpu` | `cpu` \| `cuda` |
-| `WHATSAPP_MCP_WHISPER_COMPUTE_TYPE` | `int8` | `int8` \| `float16` \| `float32` |
-| `WHATSAPP_MCP_OPENAI_MODEL` | `whisper-1` | OpenAI-side model id |
-| `OPENAI_API_KEY` | _unset_ | required when `PROVIDER=openai` |
-| `WHATSAPP_MCP_TRANSCRIPT_CACHE_DAYS` | `30` | Remove entries not used within this many days |
-| `WHATSAPP_MCP_TRANSCRIPT_CACHE_MAX_ENTRIES` | `1000` | Keep only the most recently used transcripts; set `0` to disable caching |
-
-Non-audio messages return `{"success": false, "message": "Message is not an audio message (media_type=<type>)"}` without raising.
-
-## Technical Details
-
-1. Claude sends requests to the Python MCP server
-2. The MCP server queries the Go bridge for WhatsApp data or directly to the SQLite database
-3. The Go accesses the WhatsApp API and keeps the SQLite database up to date
-4. Data flows back through the chain to Claude
-5. When sending messages, the request flows from Claude through the MCP server to the Go bridge and to WhatsApp
+Before forcing a fresh login, stop the bridge and back up `store/`. Removing only `whatsapp.db` discards the linked-device session and causes the next bridge launch to show a new QR code; retaining `messages.db` preserves the local message index.
 
 ## Troubleshooting
 
-- If you encounter permission issues when running uv, you may need to add it to your PATH or use the full path to the executable.
-- Make sure both the Go application and the Python server are running for the integration to work properly.
+### Client shows no WhatsApp tools
 
-### Authentication Issues
+- Restart the MCP client after editing its configuration.
+- Use absolute paths for both `uv` and `whatsapp-mcp-server`.
+- Ensure the MCP process starts with `whatsapp-mcp-server` as its working directory; the relative SQLite path depends on it.
+- Run `uv --directory /absolute/path/to/whatsapp-mcp-server run main.py` from a terminal to expose startup errors. It waits on stdio when healthy.
 
-- **QR Code Not Displaying**: If the QR code doesn't appear, try restarting the authentication script. If issues persist, check if your terminal supports displaying QR codes.
-- **WhatsApp Already Logged In**: If your session is already active, the Go bridge will automatically reconnect without showing a QR code.
-- **Device Limit Reached**: WhatsApp limits the number of linked devices. If you reach this limit, you'll need to remove an existing device from WhatsApp on your phone (Settings > Linked Devices).
-- **No Messages Loading**: After initial authentication, it can take several minutes for your message history to load, especially if you have many chats.
-- **WhatsApp Out of Sync**: If your WhatsApp messages get out of sync with the bridge, delete both database files (`whatsapp-bridge/store/messages.db` and `whatsapp-bridge/store/whatsapp.db`) and restart the bridge to re-authenticate.
+### Bridge is unavailable or sends fail
 
-For additional Claude Desktop integration troubleshooting, see the [MCP documentation](https://modelcontextprotocol.io/quickstart/server#claude-for-desktop-integration-issues). The documentation includes helpful tips for checking logs and resolving common issues.
+- Confirm the Go bridge is running and listening only on `127.0.0.1:8081`.
+- On automated Windows installs, run `Get-ScheduledTask -TaskName WhatsAppMCPBridge` and start it if needed.
+- Run `run-bridge.ps1` visibly to inspect logs.
+- A single TLS-handshake warning followed by a successful retry can occur on affected networks. Repeated failures indicate a real network problem.
+
+### `go-sqlite3` says CGO is disabled
+
+Install a C compiler, ensure it is on `PATH`, set `CGO_ENABLED=1`, and rebuild. Windows users should use the MSYS2 UCRT64 GCC installed by `setup.ps1`.
+
+### QR code does not appear
+
+An existing valid `whatsapp.db` reconnects silently. If you intentionally need a new linked-device session, follow the backup and reset instructions under [Local data](#local-data).
+
+### Transcription is slow or fails
+
+- The first local run may download and load the selected Whisper model. `large-v3` prioritizes accuracy over download size and startup time; choose a smaller model with `WHATSAPP_MCP_WHISPER_MODEL` if needed.
+- For CUDA, install a compatible faster-whisper/CTranslate2 runtime and choose a supported compute type.
+- For OpenAI, verify the `openai` extra is installed and `OPENAI_API_KEY` reaches the MCP process.
+- System FFmpeg is unrelated to local transcription; it is needed only to convert non-Opus audio for `send_audio_message`.
+
+## Development and verification
+
+Install Python development dependencies:
+
+```bash
+uv sync --project whatsapp-mcp-server --group dev
+```
+
+Run the existing regression suites:
+
+```bash
+# Go bridge
+cd whatsapp-bridge
+go test ./...
+
+# Python MCP server (from the repository root)
+uv run --project whatsapp-mcp-server pytest
+```
+
+On Windows, also run the scheduled-task/startup regression:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\test-windows-startup.ps1
+```
+
+There is currently no Docker/Compose setup. Contributions that improve portability, tests, or documentation are welcome; please describe the environment and include reproducible verification steps.
+
+## Project status and credits
+
+This repository exists to keep the useful work in the original project available on current setups. It is actively used by the fork maintainer, but it remains an unofficial community integration and cannot promise compatibility with future WhatsApp changes.
+
+The original project and foundation are by [Luke Harries and contributors](https://github.com/lharries/whatsapp-mcp). Fork-specific changes are maintained at [SahajJain01/whatsapp-mcp](https://github.com/SahajJain01/whatsapp-mcp).
+
+Licensed under the [MIT License](./LICENSE). The original copyright and permission notice are preserved.

@@ -19,3 +19,6 @@ nettest/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# OMO local runtime state
+.omo/
